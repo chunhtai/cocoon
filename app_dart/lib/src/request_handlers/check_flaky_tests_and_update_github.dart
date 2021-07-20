@@ -52,17 +52,18 @@ class CheckForFlakyTestAndUpdateGithub extends ApiRequestHandler<Body> {
     final BigqueryService bigquery = await config.createBigQueryService();
     final List<BuilderStatistic> builderStatisticList = await bigquery.listBuilderStatistic(kBigQueryProjectId);
     final YamlMap ci = loadYaml(await gitHub.getFileContent(slug, kCiYamlPath)) as YamlMap;
+    final YamlList targets = ci[_ciYamlTargetsKey] as YamlList;
     final String testOwnerContent = await gitHub.getFileContent(slug, kTestOwnerPath);
     final List<_BuilderDetail> builderDetails = <_BuilderDetail>[];
     final Map<String, Issue> nameToExistingIssue = await _getExistingIssues(gitHub, slug);
     final Map<String, PullRequest> nameToExistingPR = await _getExistingPRs(gitHub, slug);
     for (final BuilderStatistic statistic in builderStatisticList) {
-      final _BuilderType type = _getTypeFromTags(_getTags(statistic.name, ci));
+      final _BuilderType type = _getTypeFromTags(_getTags(statistic.name, targets));
       builderDetails.add(_BuilderDetail(
           statistic: statistic,
           existingIssue: nameToExistingIssue[statistic.name],
           existingPullRequest: nameToExistingPR[statistic.name],
-          isMarkedFlaky: _getIsMarkedFlaky(statistic.name, ci),
+          isMarkedFlaky: _getIsMarkedFlaky(statistic.name, targets),
           type: type,
           owner: _getTestOwner(statistic.name, type, testOwnerContent)));
     }
@@ -76,6 +77,13 @@ class CheckForFlakyTestAndUpdateGithub extends ApiRequestHandler<Body> {
         await _updateFlakes(gitHub, slug, builderDetail: detail);
       }
     }
+    // Deflake existing flaky tests.
+    final List<dynamic> flakyTargets = targets
+      .where((dynamic target) => target[_ciYamlTargetIsFlakyKey] == true).toList();
+    for (final dynamic flakyTarget in flakyTargets) {
+      await deflakeTarget(gitHub, slug, target: flakyTarget as YamlMap);
+    }
+
     return Body.forJson(const <String, dynamic>{
       'Statuses': 'success',
     });
@@ -182,8 +190,24 @@ class CheckForFlakyTestAndUpdateGithub extends ApiRequestHandler<Body> {
     await gitHub.assignReviewer(slug, reviewer: builderDetail.owner, pullRequestNumber: pullRequest.number);
   }
 
-  bool _getIsMarkedFlaky(String builderName, YamlMap ci) {
-    final YamlList targets = ci[_ciYamlTargetsKey] as YamlList;
+  Future<void> deflakeTarget(
+    GithubService gitHub,
+    RepositorySlug slug, {
+    @required YamlMap target,
+  }) async {
+    final String ciContent = await gitHub.getFileContent(slug, kCiYamlPath);
+    final String issueId = _getIssueIDInCiContent(ciContent, target[_ciYamlTargetBuilderKey] as String);
+    // If there is a issue attached to the target in ci, we don't want to
+    // deflake it if the issue is still open.
+    if (issueId != null) {
+      final Issue issue = await gitHub.getIssue(slug, issueNumber: int.parse(issueId));
+      if (issue.isOpen) {
+        return;
+      }
+    }
+  }
+
+  bool _getIsMarkedFlaky(String builderName, YamlList targets) {
     final YamlMap target = targets.firstWhere(
       (dynamic element) => element[_ciYamlTargetBuilderKey] == builderName,
       orElse: () => null,
@@ -191,8 +215,7 @@ class CheckForFlakyTestAndUpdateGithub extends ApiRequestHandler<Body> {
     return target != null && target[_ciYamlTargetIsFlakyKey] == true;
   }
 
-  List<dynamic> _getTags(String builderName, YamlMap ci) {
-    final YamlList targets = ci[_ciYamlTargetsKey] as YamlList;
+  List<dynamic> _getTags(String builderName, YamlList targets) {
     final YamlMap target = targets.firstWhere(
       (dynamic element) => element[_ciYamlTargetBuilderKey] == builderName,
       orElse: () => null,
@@ -347,6 +370,24 @@ class CheckForFlakyTestAndUpdateGithub extends ApiRequestHandler<Body> {
     }
     lines.insert(builderLineNumber + 1, '    $_ciYamlTargetIsFlakyKey: true # Flaky $issueUrl');
     return lines.join('\n');
+  }
+
+  String _getIssueIDInCiContent(String content, String builder) {
+    final List<String> lines = content.split('\n');
+    int lineNumber = lines.indexWhere((String line) => line.contains('builder: $builder'));
+    // Takes care the case if is _ciYamlTargetIsFlakyKey is already defined to false
+    lineNumber = lineNumber + 1;
+    while (lineNumber < lines.length && !lines[lineNumber].contains('builder:')) {
+      if (lines[lineNumber].contains('$_ciYamlTargetIsFlakyKey:')) {
+        final RegExpMatch match = issueLinkRegex.firstMatch(lines[lineNumber]);
+        if (match == null) {
+          return null;
+        }
+        return match.namedGroup('id');
+      }
+      lineNumber += 1;
+    }
+    return null;
   }
 
   Future<RepositorySlug> getSlugFor(GitHub client, String repository) async {

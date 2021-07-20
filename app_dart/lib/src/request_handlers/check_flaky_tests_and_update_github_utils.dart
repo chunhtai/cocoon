@@ -13,12 +13,8 @@ const String _commitPrefix = 'https://github.com/flutter/flutter/commit/';
 const String _buildPrefix = 'https://ci.chromium.org/ui/p/flutter/builders/prod/';
 
 // Issue
-const String kCloseIssueComment = '''
-Closed this issue because the flaky rate of this test has dropped to 0.0% and is considered
-to be no longer flaky.
+final RegExp issueLinkRegex = RegExp(r'https://github.com/flutter/flutter/issues/(?<id>.+)');
 
-If you think otherwise, reopen this issue and assign an owner to prevent it from being closed.
-''';
 const String kTeamFlakeLabel = 'team: flakes';
 const String kSevereFlakeLabel = 'severe: flake';
 const String kP1Label = 'P1';
